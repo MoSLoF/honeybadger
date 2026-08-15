@@ -23,6 +23,11 @@ even after that is fixed it ships with **insecure default configuration** and
 public-facing endpoints crash on trivially malformed input, which is a
 denial-of-service concern given the adversarial audience.
 
+**Read this alongside the "Intent alignment" section below.** HoneyBadger is an
+offensive / active-defense tool, so parts of its public surface are *deliberately*
+weaponized. One item originally filed here (#10, demo-page XSS) is by design, and
+a few others are modulated by that intent rather than being unconditional "bugs."
+
 | # | Severity | Finding | Location |
 |---|----------|---------|----------|
 | 1 | Critical | `def async(...)` is a syntax error on Python ≥3.7 — app cannot import | `decorators.py:24` |
@@ -34,12 +39,61 @@ denial-of-service concern given the adversarial audience.
 | 7 | Medium | Public `/api/beacon` crashes on bad `comment` / missing headers | `views.py:274-277` |
 | 8 | Medium | IPStack geolocation called over cleartext HTTP (API key + target IP) | `plugins.py:29` |
 | 9 | Medium | Geolocation plugins throw `TypeError` when upstream returns non-JSON | `plugins.py:42,67` |
-| 10 | Medium | Reflected XSS via `{{ text\|safe }}` on the demo page | `templates/demo.html`, `views.py:227` |
+| 10 | By design | Reflected XSS on the demo page — **intentional** agent showcase, not a defect | `templates/demo.html`, `views.py:227` |
 | 11 | Low | Wi-Fi channel table 10–14 has wrong frequency ranges → wrong geolocation | `constants.py:31-35` |
 | 12 | Low | No session-cookie hardening / security headers / login rate-limiting | `__init__.py`, `views.py` |
 | 13 | Low | Fragile parsers raise `UnboundLocalError`/`IndexError` on malformed survey data | `parsers.py` |
 | 14 | Low | `initdb` seeds demo target + beacons into the production DB | `__init__.py:52-60` |
 | 15 | Info | Dead `register.html` template references a non-existent `register` endpoint | `templates/register.html:7` |
+
+---
+
+## Intent alignment — does fixing each item serve the tool's purpose?
+
+Sources of intent: `README.md` ("Active Defense tool", "Example Web Agents"),
+`templates/demo.html` ("XSS me, please."), and the commit history
+(`fc8d8f3` always-404 for obscurity, `957304f` scenario-driven demo + CSP agent,
+`922c6b8` CORS on the beacon API). The tool's mission is to **reliably collect
+geolocation intelligence on a potentially hostile actor and keep that intel in the
+operator's hands.** Findings are judged against that mission below.
+
+**Intentional behavior — do NOT "fix" (a fix works *against* intent):**
+- **#10 — demo-page XSS.** The `{{ text|safe }}` reflection, the `'alert(' in text`
+  gate, `X-XSS-Protection: 0`, and the `window.alert` override are the delivery
+  mechanism for the HTML/JavaScript/Applet/CSP agents the README documents. This
+  page *is* the product; removing the XSS removes the demonstration. Reclassified
+  from "Medium vulnerability" to **by design**. (The only carry-over rule: never
+  copy the `|safe` pattern onto the authenticated console pages — and it isn't;
+  `beacons`/`targets`/`log` all autoescape.)
+- **Always-`abort(404)` on `/api/beacon`** (not filed as a bug — affirmed here so
+  it is not "fixed" later): deliberate obscurity per `fc8d8f3` and both util scripts.
+- **Permissive CORS on `/api/beacon`** (`@cross_origin()`, `922c6b8`): required for
+  cross-origin agents to beacon back. Intentional.
+
+**Fixes that DIRECTLY serve the mission (highest value):**
+- **#1** — app won't start on Python ≥3.7; nothing matters until it runs.
+- **#11** — the channel table 10–14 feeds Google's Wi-Fi geolocation; wrong ranges
+  degrade the tool's core accuracy.
+- **#7 / #9 / #13** — a target can crash the beacon/geolocation pipeline with
+  malformed input (bad base64 `comment`, missing User-Agent, non-JSON upstream,
+  fragile parser) and thereby **evade tracking**. Harden the collection path while
+  keeping the intentional 404 response.
+
+**Fixes that serve the mission by protecting the operator/console:**
+- **#2 / #3 / #4 / #12** — a forgeable session, an exposed debugger, CSRF-over-GET,
+  and missing headers all let an adversary the tool is tracking turn the console
+  against its operator. Aligned with intent. Caveat: this is a self-hosted research
+  console, so treat these as "harden before exposing it," not "the tool is broken."
+  (The `X-XSS-Protection: 0` critique in #12 applies to the *console*, not to the
+  demo route where the header is intentional.)
+
+**Neutral correctness/robustness (aligned, low stakes):**
+- **#5, #6, #8, #14, #15** — real defects, but fixing them neither advances nor
+  conflicts with the offensive intent.
+
+**Determination:** of 15 findings, only **#10** proposed a change that runs against
+the repo's intent (now reclassified as by-design). The remaining 14 fixes either
+serve the mission or are intent-neutral.
 
 ---
 
@@ -208,7 +262,7 @@ before any membership/subscript access.
 
 ---
 
-### 10. (Medium) Reflected XSS on the demo page
+### 10. (By design) Reflected XSS on the demo page — intentional agent showcase
 `templates/demo.html` + `views.py:225-227`
 ```python
 if text and 'alert(' in text:
@@ -216,13 +270,21 @@ if text and 'alert(' in text:
 ...
 {{ text|safe }}
 ```
-User-supplied `text` is echoed through `|safe`, disabling autoescaping, and the
-response also sets `X-XSS-Protection: 0`. While this page is an intentional
-"XSS-me" demo, the reflected sink is a genuine injection into a page served to
-third parties; the only gate is the operator-password check, which is itself
-broken (see #5). Keep the demo behavior deliberate and isolated, but do not reuse
-`|safe` on request-derived data elsewhere, and scope the demo so it can't be used
-to phish/redirect real visitors.
+**This is intended behavior, not a vulnerability to fix.** The `|safe` reflection,
+the `'alert(' in text` gate, and the `X-XSS-Protection: 0` header are the delivery
+mechanism for the HTML/JavaScript/Applet/CSP agents documented in the README's
+"Example Web Agents" section; commit `957304f` built the page as a "scenario-driven"
+agent demonstration. Removing the XSS or restoring XSS protection would defeat the
+demonstration the tool exists to give. Originally filed as a Medium vulnerability;
+reclassified here as **by design** after confirming intent from the README, the
+template, and the commit history.
+
+Residual (non-blocking) guidance — do these without touching the demo behavior:
+- Keep the `|safe` sink confined to this demo route; never reuse it on the
+  authenticated console (`beacons`/`targets`/`log` already autoescape — good).
+- The operator-password gate on this page is separately broken via the `g.user`
+  null-dereference (see #5); if you keep the gate, fix that crash, but the XSS
+  itself should stay.
 
 ---
 
@@ -249,7 +311,8 @@ depends on.
 - No `SESSION_COOKIE_SECURE`, `SESSION_COOKIE_HTTPONLY` (defaults on, but should be
   explicit), or `SESSION_COOKIE_SAMESITE='Lax'` — the last would blunt finding #4.
 - No global security headers (HSTS, `X-Content-Type-Options`, frame options, a real
-  CSP); only the demo route sets headers, and it sets `X-XSS-Protection: 0`.
+  CSP) on the authenticated console. (The demo route's `X-XSS-Protection: 0` is
+  intentional and out of scope here — see #10; this point is about the console.)
 - `/login` has no throttling/lockout → unlimited password guessing (bcrypt slows
   but does not stop it).
 **Fix:** set the cookie flags and `SameSite`; add security headers app-wide
